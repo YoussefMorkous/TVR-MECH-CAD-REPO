@@ -1,0 +1,31 @@
+name: CAD review checks
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    name: CAD snapshot
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout trusted base tools
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          lfs: false
+          persist-credentials: false
+      - name: Fetch proposed snapshot without running its code
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          gh auth setup-git
+          git fetch origin "refs/pull/$PR_NUMBER/head"
+      - name: Check manifest and LFS pointers
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 tools/validate.py --base "$BASE_SHA" --head "$HEAD_SHA" >> "$GITHUB_STEP_SUMMARY"
