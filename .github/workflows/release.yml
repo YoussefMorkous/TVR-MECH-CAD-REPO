@@ -1,0 +1,63 @@
+name: Publish reviewed CAD release
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release name, e.g. V1.85.2 or V2.0'
+        required: true
+        type: string
+      reviewed_commit:
+        description: 'Full 40-character SHA of the main snapshot you reviewed'
+        required: true
+        type: string
+      reviewed:
+        description: 'I have rebuilt and approved this complete main snapshot in SOLIDWORKS'
+        required: true
+        type: boolean
+permissions:
+  contents: write
+concurrency:
+  group: cad-release
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main' && inputs.reviewed
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          lfs: true
+          fetch-depth: 0
+      - name: Build complete release ZIP and inventory
+        env:
+          VERSION: ${{ inputs.version }}
+          REVIEWED_COMMIT: ${{ inputs.reviewed_commit }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, re, subprocess, sys
+          sys.path.insert(0, 'tools')
+          import cad
+          version = os.environ['VERSION']
+          if os.environ['REVIEWED_COMMIT'] != cad.git('rev-parse', 'HEAD'):
+              raise SystemExit('main changed or the reviewed commit is incorrect. Review the current snapshot first.')
+          if not re.fullmatch(r'V[0-9]+\.[0-9]+(?:\.[0-9]+)?', version):
+              raise SystemExit('Use a release name such as V1.85.2 or V2.0')
+          subprocess.run(['git', 'lfs', 'fsck'], check=True)
+          cad.export_zip('TVR-' + version + '.zip')
+          pathlib.Path('snapshot.json').write_text(json.dumps({
+              'release': version, 'commit': cad.git('rev-parse', 'HEAD'),
+              'files': cad.inventory()}, indent=2) + '\n')
+          PY
+      - name: Create new release and frozen tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          if git rev-parse --verify "refs/tags/$VERSION" >/dev/null 2>&1; then
+            echo 'This version already exists. Choose a new release number.'
+            exit 1
+          fi
+          gh release create "$VERSION" "TVR-$VERSION.zip" snapshot.json \
+            --target "$(git rev-parse HEAD)" --title "TVR $VERSION" \
+            --notes 'Reviewed CAD snapshot. Download the TVR ZIP asset for real CAD files and the original directory layout. snapshot.json records the commit and file hashes.'
