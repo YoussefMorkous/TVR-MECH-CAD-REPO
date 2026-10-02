@@ -17,7 +17,7 @@ For download/edit/upload: start an edit, **Export editable ZIP**, extract to a s
 
 ## One-time member installation (Windows)
 
-Install Git for Windows (with Git LFS), GitHub CLI, and Python 3 with Tcl/Tk and the `py` launcher. Sign in to GitHub CLI once with `gh auth login`, then clone this private repository using your normal GitHub access:
+Install Git for Windows (with Git LFS), GitHub CLI, and Python 3 with Tcl/Tk and the `py` launcher. Sign in to GitHub CLI once with `gh auth login`, then clone this repository using your normal GitHub access:
 
 ```powershell
 gh repo clone YoussefMorkous/TVR-MECH-CAD-REPO
@@ -36,6 +36,10 @@ Click **Import initial assembly (lead)** and choose that separate folder. Open t
 No actual rocket CAD files are included in the starter repository.
 
 ## Admin setup
+
+The deployed repository currently uses a `main` protection rule requiring a pull request, one approval, CODEOWNERS review, dismissal of stale approvals, and the current `CAD snapshot` check. Force pushes and deletion are disabled. The repository owner retains GitHub's administrator bypass for the initial import and lead-authored changes, which cannot receive the owner's own approval. Use it only after checking the assembly and passing CI.
+
+The repository is currently public. GitHub Free only enforces these rules for public repositories. Making it private on this plan removes enforcement; decide on visibility and plan before importing non-public CAD.
 
 The required review check is **CAD snapshot**. Where your GitHub plan permits private-repository branch protection, protect `main`, require this check and a CODEOWNERS approval, dismiss stale approvals, require the branch to be current before merging, and disallow force pushes and deletions. Give only the lead release/admin authority. Apply tag rules to `V*` where supported.
 
