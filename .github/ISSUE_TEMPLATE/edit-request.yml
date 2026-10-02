@@ -1,0 +1,23 @@
+name: CAD edit request
+description: Plan an edit before starting a session in the Windows helper.
+title: "CAD: "
+body:
+  - type: textarea
+    id: purpose
+    attributes:
+      label: Purpose and target configuration
+      description: What needs to change? Which rocket version and motor configuration?
+    validations:
+      required: true
+  - type: textarea
+    id: components
+    attributes:
+      label: Components
+      description: List relative paths under cad/ where possible.
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Planned validation
+      description: Rebuild, fit, mates, mass, drawings, interference, etc.
