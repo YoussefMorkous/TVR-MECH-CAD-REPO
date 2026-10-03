@@ -171,6 +171,37 @@ class ProjectTests(unittest.TestCase):
         self.assertEqual(cad.inventory(project='cage-testing'), cad.project_files(self.before, 'cage-testing'))
         self.assertEqual(cad.inventory(project=cad.LEGACY), cad.project_files(self.before, cad.LEGACY))
 
+    def test_returned_zip_restores_baseline_bytes_over_local_edits(self):
+        self.add_projects()
+        part = 'cad/projects/v2/Part.SLDPRT'
+        with self.server():
+            cad.start([part], 'Review returned V2', project='v2')
+            archive = Path(self.tmp.name) / 'original-v2.zip'
+            cad.export_zip(archive, project='v2', editable=True)
+            (self.root / part).write_bytes(b'local draft to replace')
+            cad.import_zip(archive)
+        self.assertEqual((self.root / part).read_bytes(), b'v2 part')
+        with zipfile.ZipFile(next((self.root / 'exports').glob('before-import-*.zip'))) as backup:
+            self.assertEqual(backup.read(part), b'local draft to replace')
+
+    def test_returned_zip_does_not_restore_out_of_scope_local_edits(self):
+        self.add_projects()
+        part = 'cad/projects/v2/Part.SLDPRT'
+        other = 'cad/projects/v2/Other.SLDPRT'
+        (self.root / other).write_bytes(b'original other')
+        self.g('add', other)
+        self.g('commit', '-m', 'Add unrelated component')
+        self.g('-c', 'core.hooksPath=/dev/null', 'push', 'origin', 'main')
+        with self.server():
+            cad.start([part], 'Review returned V2', project='v2')
+            archive = Path(self.tmp.name) / 'original-v2.zip'
+            cad.export_zip(archive, project='v2', editable=True)
+            (self.root / other).chmod(0o644)
+            (self.root / other).write_bytes(b'out of scope local draft')
+            with self.assertRaisesRegex(RuntimeError, 'outside the selected scope'):
+                cad.import_zip(archive)
+        self.assertEqual((self.root / other).read_bytes(), b'out of scope local draft')
+
     def test_validator_rejects_cross_project_changes_even_if_allowed(self):
         self.add_projects()
         with self.server():
