@@ -1,0 +1,25 @@
+name: Overdue CAD edit reminders
+on:
+  schedule:
+    - cron: '0 16 * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+  issues: write
+concurrency:
+  group: cad-edit-reminders
+  cancel-in-progress: false
+jobs:
+  remind:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Always use reviewed main, including for a manually dispatched run.
+          ref: main
+          lfs: false
+      - name: Check assembly locks and notify lead
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 tools/remind.py --hours 24
