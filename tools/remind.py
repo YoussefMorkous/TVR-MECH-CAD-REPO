@@ -6,7 +6,7 @@ import json
 import os
 import re
 
-from cad import active_edit_status, lock_list, run
+from cad import active_edit_status, all_edit_status, lock_list, run
 
 
 def marker(lock_id):
@@ -18,8 +18,10 @@ def remind(repository, hours=24, now=None):
         raise ValueError('Expected owner/repo and a positive overdue threshold.')
     now = now or datetime.now(timezone.utc)
     locks = lock_list()  # A failed request must not be interpreted as an unlocked vault.
-    status = active_edit_status(locks, now)
-    active_marker = marker(status['lock_id']) if status['active'] else None
+    statuses = all_edit_status(locks, now)
+    active_markers = {marker(status['lock_id']) for status in statuses.values()}
+    if any(status['age_hours'] is None for status in statuses.values()):
+        raise RuntimeError('Active lock has no valid start time; the lead must inspect it.')
     pages = json.loads(run('gh', 'api', 'repos/' + repository + '/issues?state=all&per_page=100',
                            '--paginate', '--slurp'))
     issues = [issue for page in pages for issue in page
@@ -28,37 +30,43 @@ def remind(repository, hours=24, now=None):
               re.search(r'<!-- tvr-edit-lock:[a-f0-9]{64} -->', issue.get('body') or '')]
     # Resolve previous bot reminders once their specific lock is gone.
     for issue in issues:
-        if issue['state'] == 'open' and (not active_marker or active_marker not in (issue.get('body') or '')):
+        if issue['state'] == 'open' and not any(value in (issue.get('body') or '') for value in active_markers):
             run('gh', 'issue', 'close', str(issue['number']), '--repo', repository,
                 '--reason', 'completed')
-    if not status['active']:
+    if not statuses:
         return 'No active assembly edit. Previous reminders resolved.'
-    if status['age_hours'] is None:
-        raise RuntimeError('Active lock has no valid start time; the lead must inspect it.')
-    if status['age_hours'] < hours:
-        return 'Active session is below the overdue threshold.'
-    if any(active_marker in (issue.get('body') or '') for issue in issues):
-        return 'This edit session already has a reminder; no duplicate notification.'
-    # Re-read immediately before publishing; avoid reminding for a released/replaced lock.
-    latest = active_edit_status(lock_list(), now)
-    if not latest['active'] or latest['lock_id'] != status['lock_id']:
-        return 'The session finished while checking; no reminder sent.'
-    lead = repository.split('/')[0]
-    owner = json.dumps(status['owner']).replace('@', '\\@').replace('`', '\\`')
-    body = (active_marker + '\n\n@' + lead + ', this assembly edit has been held for '
-            + f"{status['age_hours']:.1f} hours.\n\n"
-            + 'Editor reported by Git LFS: ' + owner + '\n\n'
-            + 'Started: ' + str(status['locked_at']) + '\n\n'
-            + 'Please check with the editor. They can submit and finish the session, or close '
-            + 'SOLIDWORKS and click **Cancel edit (keep backup)**. If the editor is unavailable, '
-            + 'confirm their work is preserved before the lead clears abandoned locks.\n\n'
-            + 'Viewing and downloading the approved assembly remain available. '
-            + 'This reminder does not expire or release any lock. The daily check closes '
-            + 'this issue once this specific assembly lock is gone. Closing the issue yourself '
-            + 'acknowledges it; the same session will not generate another issue.')
-    output = run('gh', 'api', '--method', 'POST', 'repos/' + repository + '/issues',
-                 '-f', 'title=Overdue CAD edit: ' + status['lock_id'], '-f', 'body=' + body)
-    return 'Overdue edit reminder created: ' + json.loads(output)['html_url']
+    results = []
+    for project, status in statuses.items():
+        active_marker = marker(status['lock_id'])
+        if status['age_hours'] < hours:
+            results.append(project + ': active session is below the overdue threshold.')
+            continue
+        if any(active_marker in (issue.get('body') or '') for issue in issues):
+            results.append(project + ': this edit session already has a reminder; no duplicate notification.')
+            continue
+        # Recheck this project immediately before posting. Other projects remain independent.
+        latest = active_edit_status(lock_list(), now, project=project)
+        if not latest['active'] or latest['lock_id'] != status['lock_id']:
+            results.append(project + ': the session finished while checking; no reminder sent.')
+            continue
+        lead = repository.split('/')[0]
+        owner = json.dumps(status['owner']).replace('@', '\\@').replace('`', '\\`')
+        body = (active_marker + '\n\nProject: `' + project + '`\n\n@' + lead + ', this assembly edit has been held for '
+                + f"{status['age_hours']:.1f} hours.\n\n"
+                + 'Editor reported by Git LFS: ' + owner + '\n\n'
+                + 'Started: ' + str(status['locked_at']) + '\n\n'
+                + 'Please check with the editor. They can submit and finish the session, or close '
+                + 'SOLIDWORKS and click **Cancel edit (keep backup)**. If the editor is unavailable, '
+                + 'confirm their work is preserved before the lead clears abandoned locks.\n\n'
+                + 'Viewing and downloading the approved assembly remain available. '
+                + 'This reminder does not expire or release any lock. The daily check closes '
+                + 'this issue once this specific assembly lock is gone. Closing the issue yourself '
+                + 'acknowledges it; the same session will not generate another issue.')
+        output = run('gh', 'api', '--method', 'POST', 'repos/' + repository + '/issues',
+                     '-f', 'title=Overdue CAD edit: ' + project + ' (' + status['lock_id'] + ')', '-f', 'body=' + body)
+        results.append('Overdue edit reminder created: ' + json.loads(output)['html_url'])
+    return '\n'.join(results)
+
 
 
 if __name__ == '__main__':
