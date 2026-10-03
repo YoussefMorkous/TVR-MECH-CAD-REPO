@@ -1,0 +1,20 @@
+{
+  "id": "2a43925b680545f689f57b0a0d16af18",
+  "base": "2c304914693e47beb702f2fad70f47a4680844c5",
+  "reason": "Add landing boots to assembly",
+  "allowed": [
+    "cad/FULL_V1.85_ASSEMBLY.SLDASM",
+    "cad/Frame_and_Legs.SLDASM",
+    "cad/Lower_Servo_Assembly.SLDASM",
+    "cad/Propulssion_Cage_Assembly.SLDASM",
+    "cad/Propulssion_Holder_Assembly.SLDASM",
+    "cad/XMH-430_SERVO1.SLDASM",
+    "cad/XMH-430_SERVO2.SLDASM",
+    "cad/avionics bay assembly.SLDASM",
+    "cad/Landing_Boot.SLDPRT"
+  ],
+  "changes": {
+    "cad/Frame_and_Legs.SLDASM": "modified",
+    "cad/Landing_Boot.SLDPRT": "added"
+  }
+}
