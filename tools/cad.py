@@ -562,8 +562,11 @@ def import_zip(source):
         current = inventory(project=s.get('project', LEGACY))
         if meta in current and staged.get(meta) != current[meta]:
             raise RuntimeError('Keep the project details unchanged in the returned ZIP.')
-        changes = diff(project_files(s['baseline'], s.get('project', LEGACY)), staged)
-        unexpected = sorted(set(changes) - set(s['allowed']))
+        proposed = diff(project_files(s['baseline'], s.get('project', LEGACY)), staged)
+        # Apply the returned snapshot against actual workspace bytes, including
+        # restorations to baseline and files locally added/deleted since export.
+        changes = diff(current, staged)
+        unexpected = sorted((set(proposed) | set(changes)) - set(s['allowed']))
         if unexpected:
             raise RuntimeError('ZIP changes outside the selected scope:\n' + '\n'.join(unexpected))
         # Keep a complete pre-import copy; never overwrite the only copy of member work.
