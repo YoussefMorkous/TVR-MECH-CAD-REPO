@@ -13,6 +13,12 @@ This repository is separate from the team's existing projects.
 
 One whole-assembly edit session is allowed at a time. All parent `.SLDASM` files are automatically in scope. This deliberately avoids combining two independently saved binary assemblies. Per-component parallel sessions can be added later with a proper integration process.
 
+The helper shows **Currently being edited by...** with the lock owner's name and elapsed time. It refreshes from the lock server every minute and when you perform an action. Viewing and **Download current / historic snapshot** remain available during another person's edit; a download alone never takes a lock. An unavailable lock server is shown as an unknown status, rather than claiming the vault is free.
+
+If you decide not to submit, close SOLIDWORKS and click **Cancel edit (keep backup)**. It saves a complete CAD ZIP in `exports/`, stashes staged/unstaged and untracked Git work, and retains the edit branch and a recovery JSON with the ZIP paths and stash IDs. It closes any PR for that session before releasing selected locks, then releases the assembly lock last. If closure, backup, or unlocking fails, locks/session information remain for a retry. Cancellation does not delete your branch or backups. Start a fresh edit from current `main` before reconciling recovered work.
+
+Sessions become **overdue after 24 hours**. **Actions → Overdue CAD edit reminders** checks daily at 16:00 UTC (and supports Run workflow). It opens one GitHub issue per overdue session and mentions the repository owner/lead, Youssef. Notifications follow your GitHub notification settings. The helper also warns the editor while it is open. Because the server check is daily, the first issue may appear between 24 and 48 hours after checkout, subject to GitHub scheduling delays. The issue closes after that lock is released; manually closing it acknowledges the reminder without generating duplicates. Neither the reminder nor closing its issue releases a lock. No automatic expiry is enabled.
+
 For download/edit/upload: start an edit, **Export editable ZIP**, extract to a separate folder, edit and save there, ZIP the `cad/` folder itself, and **Import returned ZIP**. Use the same filenames and directory layout. Import expects a complete snapshot, not just changed parts. Missing selected files count as deletions. Extend scope explicitly before importing new or unexpected files. A pre-import ZIP backup is saved in `exports/`.
 
 ## One-time member installation (Windows)
@@ -80,7 +86,9 @@ Git/LFS stores another complete binary object for each changed file and reuses u
 
 If the network fails after commit or push, **Submit for review** can be retried; the helper records its stage and reuses an existing PR. If unlocking fails, **Finish** retains the remaining IDs and can be retried. If `main` advances while a session is open, submission stops: keep/export your work and have the lead reconcile it instead of overwriting newer files.
 
-For an edit abandoned before submission, preserve work with **Export editable ZIP**, then use `git stash push --include-untracked` from the repository so the workspace is clean, and click **Finish**. The stash and exported ZIP retain the changes. For a submitted edit, close its PR first, then finish. Do not force-unlock another person's work until the lead has confirmed recovery.
+For an abandoned edit, use **Cancel edit (keep backup)**, or `py -3 tools/cad.py cancel` after closing SOLIDWORKS. If interruption leaves the session in `canceling`, retry Cancel; Submit and Finish will not skip that recovery. The recovery JSON in `exports/` records the retained branch, commit, ZIP paths, and stash IDs. To inspect recovered work later, preserve the current workspace first and apply the recorded stash with `git stash apply --index <stash-id>` on its original branch, or extract its ZIP into a separate folder. Do not apply old work over an active session without lead reconciliation.
+
+If the original editor is unavailable, the lead first confirms that their work is preserved and closes their pending CAD PR. Inspect `git lfs locks --json`, then use `git lfs unlock --id <selected-file-lock-id> --force` for each selected lock belonging to that abandoned session and finally its `cad/.edit-lock` ID. Server permission is required. Never release the global lock first or blindly unlock every team member's files. A previously downloaded copy still exists; the original editor must start a new session against current main and reconcile it before submitting.
 
 ## Command-line equivalents
 
@@ -91,6 +99,7 @@ py -3 tools/cad.py status
 py -3 tools/cad.py allow cad/Parts/AdditionalPart.SLDPRT
 py -3 tools/cad.py submit
 py -3 tools/cad.py finish
+py -3 tools/cad.py cancel
 py -3 tools/cad.py export old-rocket.zip --ref V1.85.2
 ```
 

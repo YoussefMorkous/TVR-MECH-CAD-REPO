@@ -1,4 +1,5 @@
 import contextlib
+from datetime import datetime, timezone
 import importlib.util
 import json
 from pathlib import Path
@@ -24,6 +25,27 @@ validator = load('validate')
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_shared_status_and_overdue_boundary_without_local_session(self):
+        now = datetime(2026, 10, 3, 16, tzinfo=timezone.utc)
+        locks = [{'id': '1', 'path': cad.LOCK, 'owner': {'name': 'Engineer'},
+                  'locked_at': '2026-10-02T16:00:00Z'}]
+        status = cad.active_edit_status(locks, now)
+        self.assertEqual(status['owner'], 'Engineer')
+        self.assertEqual(status['age_hours'], 24)
+        self.assertTrue(status['overdue'])
+        self.assertIn('Viewing/downloads are available', cad.status_text(status))
+        self.assertFalse(cad.active_edit_status([], now)['active'])
+        with patch.object(cad, 'lock_list', return_value=locks), contextlib.redirect_stdout(__import__('io').StringIO()) as output:
+            cad.show_status()
+        self.assertNotIn('local', json.loads(output.getvalue()))
+
+    def test_missing_timestamp_and_orphan_locks_are_not_reported_as_free(self):
+        status = cad.active_edit_status([{'id': '1', 'path': cad.LOCK}])
+        self.assertIsNone(status['age_hours'])
+        self.assertFalse(status['overdue'])
+        status = cad.active_edit_status([{'id': '2', 'path': 'cad/Mount.SLDPRT'}])
+        self.assertIn('Leftover CAD locks', cad.status_text(status))
+
     def test_current_and_older_lock_json_formats(self):
         lock = {'id': '123', 'path': 'cad/.edit-lock'}
         self.assertEqual(cad.lock_result(json.dumps(lock)), lock)
@@ -177,6 +199,28 @@ class WorkflowTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'lock was lost'):
                 cad.check_locks({'locks': [{'id': '1', 'path': 'cad/.edit-lock'}]})
 
+    def test_failed_checkout_keeps_assembly_lock_when_component_cleanup_fails(self):
+        actual = cad.git
+        acquired, attempted = [], []
+        def server(*args, **kwargs):
+            if args[:2] == ('lfs', 'pull'):
+                return ''
+            if args[:2] == ('lfs', 'lock'):
+                if len(acquired) == 2:
+                    raise RuntimeError('Mount already locked')
+                acquired.append(args[-1])
+                return json.dumps({'id': str(len(acquired)), 'path': args[-1]})
+            if args[:2] == ('lfs', 'unlock'):
+                attempted.append(args[-1])
+                raise RuntimeError('Cannot contact lock server')
+            return actual(*args, **kwargs)
+        with patch.object(cad, 'git', server):
+            with self.assertRaisesRegex(RuntimeError, 'Mount already locked'):
+                cad.start(['cad/Mount.SLDPRT'], 'Fit motor')
+        self.assertEqual(attempted, ['2'])
+        self.assertEqual(cad.session()['phase'], 'cleanup')
+        self.assertEqual([lock['id'] for lock in cad.session()['locks']], ['1', '2'])
+
     def test_separate_tooling_pr_is_allowed(self):
         (self.root / 'tools/new.py').write_text('print("updated helper")')
         self.g('add', 'tools/new.py')
@@ -232,6 +276,111 @@ class WorkflowTests(unittest.TestCase):
             cad.finish()
         self.assertEqual(owned, [])
         self.assertFalse(cad.state_file().exists())
+
+    def cancellation_session(self, phase='editing'):
+        self.g('switch', '-c', 'cad/edit-canceltest')
+        state = dict(id='c' * 32, branch='cad/edit-canceltest', base=self.base,
+                     reason='Test cancellation', baseline=self.before, phase=phase,
+                     allowed=['cad/Mount.SLDPRT'],
+                     locks=[{'id': 'global', 'path': cad.LOCK},
+                            {'id': 'part', 'path': 'cad/Mount.SLDPRT'}])
+        cad.save(state)
+        return state
+
+    def test_cancel_preserves_staged_and_untracked_work_before_unlocking(self):
+        self.cancellation_session()
+        (self.root / 'cad/Mount.SLDPRT').write_bytes(b'unfinished motor fit')
+        (self.root / 'cad/New.SLDPRT').write_bytes(b'untracked part')
+        (self.root / 'notes.txt').write_text('Keep these notes')
+        self.g('add', 'cad/Mount.SLDPRT')
+        actual = cad.git
+        released = []
+        def server(*args, **kwargs):
+            if args[:2] == ('lfs', 'unlock'):
+                self.assertEqual(self.g('status', '--porcelain'), '')
+                self.assertTrue(list((self.root / 'exports').glob('*.zip')))
+                released.append(args[-1])
+                return ''
+            return actual(*args, **kwargs)
+        actual_run = cad.run
+        def cli(*args, **kwargs):
+            return '[]' if args[:3] == ('gh', 'pr', 'list') else actual_run(*args, **kwargs)
+        with patch.object(cad, 'git', server), patch.object(cad, 'run', cli):
+            cad.cancel()
+        self.assertEqual(released, ['part', 'global'])
+        self.assertFalse(cad.state_file().exists())
+        with zipfile.ZipFile(next((self.root / 'exports').glob('*.zip'))) as z:
+            self.assertEqual(z.read('cad/Mount.SLDPRT'), b'unfinished motor fit')
+            self.assertEqual(z.read('cad/New.SLDPRT'), b'untracked part')
+        journal = json.loads(next((self.root / 'exports').glob('*recovery.json')).read_text())
+        stash = next(entry['stash'] for entry in journal['recovery'] if 'stash' in entry)
+        self.g('stash', 'apply', '--index', stash)
+        self.assertEqual((self.root / 'notes.txt').read_text(), 'Keep these notes')
+        self.assertEqual((self.root / 'cad/New.SLDPRT').read_bytes(), b'untracked part')
+        self.assertIn('M  cad/Mount.SLDPRT', self.g('status', '--porcelain'))
+
+    def test_cancel_unlock_failure_keeps_global_lock_and_retries_safely(self):
+        self.cancellation_session()
+        (self.root / 'cad/Mount.SLDPRT').write_bytes(b'preserve work through network failure')
+        actual_git, actual_run = cad.git, cad.run
+        released = []
+        fail = [True]
+        def server(*args, **kwargs):
+            if args[:2] == ('lfs', 'unlock'):
+                if fail[0]:
+                    raise RuntimeError('Network unavailable')
+                released.append(args[-1])
+                return ''
+            return actual_git(*args, **kwargs)
+        def cli(*args, **kwargs):
+            return '[]' if args[:3] == ('gh', 'pr', 'list') else actual_run(*args, **kwargs)
+        with patch.object(cad, 'git', server), patch.object(cad, 'run', cli):
+            with self.assertRaisesRegex(RuntimeError, 'Network unavailable'):
+                cad.cancel()
+            self.assertEqual(released, [])
+            self.assertEqual(cad.session()['phase'], 'canceling')
+            self.assertEqual(len(cad.session()['locks']), 2)
+            with self.assertRaisesRegex(RuntimeError, 'retry Cancel'):
+                cad.submit()
+            fail[0] = False
+            cad.cancel()
+        self.assertEqual(released, ['part', 'global'])
+        self.assertFalse(cad.state_file().exists())
+
+    def test_cancel_cannot_release_locks_while_pr_is_still_open(self):
+        self.cancellation_session(phase='submitted')
+        actual_run = cad.run
+        calls = []
+        def cli(*args, **kwargs):
+            if args[:2] == ('gh', 'pr'):
+                calls.append(args)
+                return json.dumps([{'state': 'OPEN', 'number': 7, 'url': 'https://example.com/pr/7'}]) if args[2] == 'list' else ''
+            return actual_run(*args, **kwargs)
+        with patch.object(cad, 'run', cli), patch.object(cad, 'release_locks') as release:
+            with self.assertRaisesRegex(RuntimeError, 'still open'):
+                cad.cancel()
+        release.assert_not_called()
+        self.assertIn(('gh', 'pr', 'close', '7'), calls)
+        self.assertEqual(cad.session()['phase'], 'canceling')
+
+    def test_partial_unlock_retains_only_remaining_ids(self):
+        state = self.cancellation_session()
+        state['locks'].append({'id': 'second', 'path': 'cad/Ring.sldprt'})
+        cad.save(state)
+        attempted = []
+        actual = cad.git
+        def server(*args, **kwargs):
+            if args[:2] != ('lfs', 'unlock'):
+                return actual(*args, **kwargs)
+            attempted.append(args[-1])
+            if args[-1] == 'part':
+                raise RuntimeError('Server unavailable')
+            return ''
+        with patch.object(cad, 'git', server):
+            with self.assertRaisesRegex(RuntimeError, 'Server unavailable'):
+                cad.release_locks(state)
+        self.assertEqual(attempted, ['second', 'part'])
+        self.assertEqual([lock['id'] for lock in cad.session()['locks']], ['global', 'part'])
 
 
 if __name__ == '__main__':

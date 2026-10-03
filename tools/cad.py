@@ -1,5 +1,6 @@
 """Small, dependency-free TVR CAD client. Git, Git LFS and gh are required."""
 import argparse
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -15,18 +16,22 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 NATIVE = {'.sldprt', '.sldasm', '.slddrw'}
 LOCK = 'cad/.edit-lock'
+OVERDUE_HOURS = 24
 
 
-def run(*args, cwd=None, env=None):
-    p = subprocess.run(args, cwd=cwd or ROOT, env=env, capture_output=True, text=True,
-                       encoding='utf-8', errors='replace')
+def run(*args, cwd=None, env=None, timeout=None):
+    try:
+        p = subprocess.run(args, cwd=cwd or ROOT, env=env, capture_output=True, text=True,
+                           encoding='utf-8', errors='replace', timeout=timeout)
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError('Server check timed out. Try again when the connection is available.') from e
     if p.returncode:
         raise RuntimeError(p.stderr.strip() or p.stdout.strip() or 'Command failed')
     return p.stdout.strip()
 
 
-def git(*args, cwd=None):
-    return run('git', *args, cwd=cwd)
+def git(*args, cwd=None, timeout=None):
+    return run('git', *args, cwd=cwd, timeout=timeout)
 
 
 def state_file():
@@ -54,6 +59,61 @@ def lock_result(output):
     if not lock.get('id'):
         raise RuntimeError('Lock server did not return an ID.')
     return lock
+
+
+def lock_list():
+    obj = json.loads(git('lfs', 'locks', '--json', timeout=15))
+    locks = obj if isinstance(obj, list) else obj.get('locks')
+    if not isinstance(locks, list) or any(not isinstance(lock, dict) or not lock.get('id')
+                                         or not isinstance(lock.get('path'), str) for lock in locks):
+        raise RuntimeError('Lock server returned an unexpected response.')
+    return locks
+
+
+def active_edit_status(locks=None, now=None):
+    locks = lock_list() if locks is None else locks
+    now = now or datetime.now(timezone.utc)
+    active = [lock for lock in locks if lock.get('path') == LOCK]
+    if len(active) > 1:
+        raise RuntimeError('Multiple assembly locks reported. Ask the lead to investigate.')
+    if not active:
+        leftovers = [lock for lock in locks if lock.get('path', '').startswith('cad/')]
+        return {'active': False, 'leftover_locks': leftovers}
+    lock = active[0]
+    age = None
+    try:
+        started = datetime.fromisoformat(lock['locked_at'].replace('Z', '+00:00'))
+        if started.tzinfo is not None:
+            age = max(0, (now - started).total_seconds() / 3600)
+    except (KeyError, TypeError, ValueError):
+        pass
+    return {'active': True, 'lock_id': str(lock['id']),
+            'owner': (lock.get('owner') or {}).get('name') or 'Unknown editor',
+            'locked_at': lock.get('locked_at'), 'age_hours': age,
+            'overdue': age is not None and age >= OVERDUE_HOURS}
+
+
+def status_text(status):
+    if not status['active']:
+        if status.get('leftover_locks'):
+            return 'Leftover CAD locks remain. Ask the lead to check. Viewing/downloads are available.'
+        return 'No active edit. Viewing/downloads are available.'
+    age = status['age_hours']
+    elapsed = f'{age:.1f} hours' if age is not None else 'start time unknown'
+    text = f"Currently being edited by {status['owner']} ({elapsed}). Viewing/downloads are available."
+    if status['overdue']:
+        text += ' Overdue: finish or cancel your session, or contact the lead.'
+    return text
+
+
+def show_status():
+    result = {'shared': active_edit_status()}
+    if state_file().exists():
+        s = session()
+        result['local'] = {'branch': s['branch'], 'phase': s['phase'],
+                           'changes': diff(s['baseline'], inventory()),
+                           'recovery': s.get('recovery', [])}
+    print(json.dumps(result, indent=2))
 
 
 def inventory(root=None):
@@ -142,18 +202,12 @@ def start(paths, reason, initial=False):
         save(s)
     except Exception:
         # Do not lose lock IDs when cleanup cannot reach the server.
-        failed = []
-        for lock in reversed(s['locks']):
-            try:
-                git('lfs', 'unlock', '--id', lock['id'])
-            except RuntimeError:
-                failed.append(lock)
-        if failed:
-            s['locks'] = list(reversed(failed))
-            s['phase'] = 'cleanup'
-            save(s)
-        else:
-            state_file().unlink(missing_ok=True)
+        s['phase'] = 'cleanup'
+        save(s)
+        try:
+            release_locks(s)
+        except RuntimeError:
+            pass  # Preserve the original failure; Finish can retry remaining IDs.
         raise
     print('Edit session started: ' + s['branch'])
 
@@ -187,8 +241,8 @@ def allow(paths):
 
 def submit():
     s = session()
-    if s['phase'] == 'cleanup':
-        raise RuntimeError('Finish the failed session cleanup first.')
+    if s['phase'] in ('cleanup', 'canceling'):
+        raise RuntimeError('Finish cleanup or retry Cancel edit before submitting.')
     if git('branch', '--show-current') != s['branch']:
         raise RuntimeError('Return to your edit branch before submitting.')
     check_locks(s)
@@ -240,27 +294,80 @@ def submit():
     print('Submitted for review: ' + s['pr'])
 
 
+def release_locks(s):
+    # Selected files first; the global assembly lock is released LAST.
+    while s['locks']:
+        lock = s['locks'][-1]
+        try:
+            git('lfs', 'unlock', '--id', lock['id'])
+        except RuntimeError as e:
+            save(s)
+            raise RuntimeError('Locks remain. Retry the same Finish / Cancel action.\n' + str(e)) from e
+        s['locks'].pop()
+        save(s)
+    state_file().unlink()
+
+
 def finish():
     s = session()
+    if s['phase'] == 'canceling':
+        raise RuntimeError('Cancellation is in progress. Retry Cancel edit.')
     if s['phase'] in ('submitted', 'committed'):
         prs = json.loads(run('gh', 'pr', 'list', '--head', s['branch'], '--state', 'all', '--json', 'state,url'))
         if not prs or any(p['state'] == 'OPEN' for p in prs):
             raise RuntimeError('Merge or close the pull request before releasing locks.')
     ensure_clean()
-    remaining = []
-    errors = []
-    for lock in reversed(s['locks']):
-        try:
-            git('lfs', 'unlock', '--id', lock['id'])
-        except RuntimeError as e:
-            remaining.append(lock)
-            errors.append(str(e))
-    if remaining:
-        s['locks'] = list(reversed(remaining))
-        save(s)
-        raise RuntimeError('Some locks remain. Retry Finish.\n' + '\n'.join(errors))
-    state_file().unlink()
+    release_locks(s)
     print('Locks released. Your edit branch is retained locally.')
+
+
+def cancel():
+    s = session()
+    if s['phase'] == 'cleanup':
+        finish()
+        return 'Failed session cleanup finished.'
+    if git('branch', '--show-current') != s['branch']:
+        raise RuntimeError('Return to your edit branch before canceling.')
+    s['phase'] = 'canceling'
+    s.setdefault('recovery', [])
+    save(s)
+    folder = ROOT / 'exports'
+    folder.mkdir(exist_ok=True)
+    journal = folder / ('cancel-' + s['id'] + '-recovery.json')
+    def record(item=None):
+        if item:
+            s['recovery'].append(item)
+        save(s)
+        journal.write_text(json.dumps({'branch': s['branch'], 'base': s['base'],
+                                      'head': git('rev-parse', 'HEAD'),
+                                      'recovery': s['recovery']}, indent=2), encoding='utf-8')
+    # Preserve actual CAD bytes before stashing anything (including untracked work).
+    if inventory():
+        archive = folder / ('cancel-' + s['id'] + '-' + uuid.uuid4().hex[:8] + '.zip')
+        export_zip(archive, editable=True)
+        record({'zip': str(archive)})
+    if git('status', '--porcelain'):
+        git('stash', 'push', '--include-untracked', '-m', 'TVR canceled edit ' + s['id'])
+        record({'stash': git('rev-parse', 'refs/stash')})
+    ensure_clean()
+    # Close only PRs for this edit branch. If the server is unavailable, keep locks.
+    prs = json.loads(run('gh', 'pr', 'list', '--head', s['branch'], '--state', 'all',
+                         '--json', 'number,state,url'))
+    for pr in prs:
+        if pr['state'] == 'OPEN':
+            run('gh', 'pr', 'close', str(pr['number']))
+    # Recheck closure: a failed or incomplete close must not open another edit session.
+    prs = json.loads(run('gh', 'pr', 'list', '--head', s['branch'], '--state', 'all',
+                         '--json', 'number,state,url'))
+    if any(pr['state'] == 'OPEN' for pr in prs):
+        raise RuntimeError('The edit PR is still open. Retry Cancel edit after closing it.')
+    record()
+    release_locks(s)
+    message = ('Edit canceled; locks released. Your branch and backups are retained.\n'
+               'Recovery details: ' + str(journal) + '\n'
+               'Start a new edit from current main before using any recovered changes.')
+    print(message)
+    return message
 
 
 def export_zip(destination, root=None, editable=False):
@@ -370,7 +477,9 @@ def gui():
     from tkinter import filedialog, messagebox, simpledialog
     app = tk.Tk()
     app.title('TVR CAD Vault')
-    app.geometry('760x760')
+    app.geometry('820x780')
+    banner = tk.StringVar(value='Checking shared edit status...')
+    tk.Label(app, textvariable=banner, wraplength=780, justify=tk.LEFT).pack(fill=tk.X, padx=12, pady=8)
     tk.Label(app, text='Select the components you intend to edit. Parent assemblies are included.',
              wraplength=720).pack(pady=12)
     listing = tk.Listbox(app, selectmode=tk.EXTENDED, width=105, height=16)
@@ -379,11 +488,20 @@ def gui():
         listing.delete(0, tk.END)
         for p in inventory():
             listing.insert(tk.END, p)
+        refresh_status()
+    def refresh_status():
+        try:
+            banner.set(status_text(active_edit_status()))
+        except (RuntimeError, ValueError, OSError) as e:
+            banner.set('Edit status unavailable: ' + str(e) + '. You can still download a snapshot.')
+    def poll_status():
+        refresh_status()
+        app.after(60000, poll_status)
     def action(fn):
         try:
-            fn()
+            result = fn()
             refresh()
-            messagebox.showinfo('TVR CAD', 'Done. See the terminal for details.')
+            messagebox.showinfo('TVR CAD', result if isinstance(result, str) else 'Done. See the terminal for details.')
         except Exception as e:
             messagebox.showerror('TVR CAD', str(e))
     def selected():
@@ -410,21 +528,28 @@ def gui():
         path = filedialog.askdirectory(title='Choose initial Pack and Go folder')
         if path:
             seed(path)
+    def abandon():
+        if messagebox.askyesno('Cancel edit', 'Close SOLIDWORKS first. Cancel your current edit?\n\n'
+                               'The helper saves a CAD ZIP and stashes uncommitted work, closes your edit PR, '
+                               'and releases your locks. Your branch and backups remain available.'):
+            return cancel()
     for label, fn in [('One-time setup', setup), ('Import initial assembly (lead)', initial),
                       ('Refresh file list', refresh), ('Start edit', begin),
                       ('Add selected files to scope', lambda: allow(selected())),
                       ('Export editable ZIP', download), ('Import returned ZIP', upload),
                       ('Submit for review', submit), ('Finish after merge / closure', finish),
+                      ('Cancel edit (keep backup)', abandon),
                       ('Download current / historic snapshot', history)]:
         tk.Button(app, text=label, command=lambda f=fn: action(f)).pack(side=tk.TOP, fill=tk.X, padx=12)
     refresh()
+    app.after(60000, poll_status)
     app.mainloop()
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
-    for name in ('setup', 'submit', 'finish', 'gui', 'status'):
+    for name in ('setup', 'submit', 'finish', 'cancel', 'gui', 'status'):
         sub.add_parser(name)
     p = sub.add_parser('start')
     p.add_argument('--reason', required=True)
@@ -450,9 +575,7 @@ def main():
     elif a.command == 'seed':
         seed(a.source)
     elif a.command == 'status':
-        s = session()
-        print(json.dumps({'branch': s['branch'], 'phase': s['phase'],
-                          'changes': diff(s['baseline'], inventory())}, indent=2))
+        show_status()
     else:
         globals()[a.command]()
 
