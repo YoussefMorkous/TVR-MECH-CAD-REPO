@@ -19,7 +19,10 @@ jobs:
           # Always use reviewed main, including for a manually dispatched run.
           ref: main
           lfs: false
+          persist-credentials: false
       - name: Check assembly locks and notify lead
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 tools/remind.py --hours 24
+        run: |
+          gh auth setup-git
+          python3 tools/remind.py --hours 24
