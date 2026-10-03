@@ -17,6 +17,69 @@ ROOT = Path(__file__).resolve().parents[1]
 NATIVE = {'.sldprt', '.sldasm', '.slddrw'}
 LOCK = 'cad/.edit-lock'
 OVERDUE_HOURS = 24
+LEGACY = 'legacy'
+PROJECT_META = '_project.json'
+
+
+def project_root(project=LEGACY):
+    if project == LEGACY:
+        return 'cad'
+    if not isinstance(project, str) or not re.fullmatch(r'[a-z0-9]+(?:-[a-z0-9]+)*', project) or len(project) > 48:
+        raise RuntimeError('Project ID must use lowercase letters, numbers and single hyphens (maximum 48 characters).')
+    safe_path('cad/projects/' + project)
+    return 'cad/projects/' + project
+
+
+def project_lock(project=LEGACY):
+    return project_root(project) + '/.edit-lock'
+
+
+def in_project(path, project):
+    prefix = project_root(project) + '/'
+    return path.startswith(prefix) and (project != LEGACY or not path.startswith('cad/projects/'))
+
+
+def project_files(files, project):
+    return {p: value for p, value in files.items() if in_project(p, project)}
+
+
+def require_project_path(path, project, metadata=False):
+    safe_path(path)
+    if not in_project(path, project):
+        raise RuntimeError('File belongs to another project: ' + path)
+    if Path(path).name == PROJECT_META and not metadata:
+        raise RuntimeError('Project details are managed by the helper.')
+
+
+def projects(root=None):
+    root = ROOT if root is None else root
+    result = {LEGACY: 'TVR Rocket (existing assembly)'}
+    folder = root / 'cad/projects'
+    if folder.exists():
+        for path in sorted(folder.iterdir()):
+            if path.is_symlink():
+                raise RuntimeError('Project folders cannot be symlinks.')
+            if not path.is_dir():
+                raise RuntimeError('Unexpected file in cad/projects: ' + path.name)
+            project_root(path.name)
+            if path.name == LEGACY:
+                raise RuntimeError('The project ID legacy is reserved.')
+            data = json.loads((path / PROJECT_META).read_text(encoding='utf-8'))
+            name = data.get('name')
+            if data.get('id') != path.name or data.get('schema') != 1 or not isinstance(name, str) or not name.strip() or len(name) > 100:
+                raise RuntimeError('Invalid project details: ' + str(path))
+            result[path.name] = name
+    return result
+
+
+def refresh_projects():
+    if state_file().exists():
+        raise RuntimeError('Finish or cancel your current edit before updating projects.')
+    ensure_clean()
+    git('fetch', 'origin', 'main')
+    git('switch', '--detach', 'origin/main')
+    git('lfs', 'pull')
+    return 'Project list updated from the approved main branch.'
 
 
 def run(*args, cwd=None, env=None, timeout=None):
@@ -70,14 +133,14 @@ def lock_list():
     return locks
 
 
-def active_edit_status(locks=None, now=None):
+def active_edit_status(locks=None, now=None, project=LEGACY):
     locks = lock_list() if locks is None else locks
     now = now or datetime.now(timezone.utc)
-    active = [lock for lock in locks if lock.get('path') == LOCK]
+    active = [lock for lock in locks if lock.get('path') == project_lock(project)]
     if len(active) > 1:
         raise RuntimeError('Multiple assembly locks reported. Ask the lead to investigate.')
     if not active:
-        leftovers = [lock for lock in locks if lock.get('path', '').startswith('cad/')]
+        leftovers = [lock for lock in locks if in_project(lock.get('path', ''), project)]
         return {'active': False, 'leftover_locks': leftovers}
     lock = active[0]
     age = None
@@ -91,6 +154,18 @@ def active_edit_status(locks=None, now=None):
             'owner': (lock.get('owner') or {}).get('name') or 'Unknown editor',
             'locked_at': lock.get('locked_at'), 'age_hours': age,
             'overdue': age is not None and age >= OVERDUE_HOURS}
+
+
+def all_edit_status(locks, now=None):
+    identifiers = {LEGACY} if any(lock.get('path') == LOCK for lock in locks) else set()
+    for lock in locks:
+        match = re.fullmatch(r'cad/projects/([a-z0-9]+(?:-[a-z0-9]+)*)/\.edit-lock', lock.get('path', ''))
+        if match:
+            project_root(match[1])
+            if match[1] == LEGACY:
+                raise RuntimeError('Invalid reserved project lock.')
+            identifiers.add(match[1])
+    return {project: active_edit_status(locks, now, project) for project in sorted(identifiers)}
 
 
 def status_text(status):
@@ -107,19 +182,22 @@ def status_text(status):
 
 
 def show_status():
-    result = {'shared': active_edit_status()}
+    locks = lock_list()
+    result = {'shared': active_edit_status(locks), 'projects': all_edit_status(locks)}
     if state_file().exists():
         s = session()
-        result['local'] = {'branch': s['branch'], 'phase': s['phase'],
+        result['local'] = {'project': s.get('project', LEGACY), 'branch': s['branch'], 'phase': s['phase'],
                            'changes': diff(s['baseline'], inventory()),
                            'recovery': s.get('recovery', [])}
     print(json.dumps(result, indent=2))
 
 
-def inventory(root=None):
+def inventory(root=None, project=None):
     root = ROOT if root is None else root
     result = {}
     for p in sorted((root / 'cad').rglob('*')):
+        if project is not None and not in_project(p.relative_to(root).as_posix(), project):
+            continue
         if p.is_symlink():
             raise RuntimeError('Symlinks are not allowed in CAD packages.')
         if p.is_file() and p.name != '.edit-lock':
@@ -166,7 +244,7 @@ def setup():
     print('Ready. Keep this clone outside OneDrive and other sync folders.')
 
 
-def start(paths, reason, initial=False):
+def start(paths, reason, initial=False, project=LEGACY):
     ensure_clean()
     if state_file().exists():
         raise RuntimeError('Finish the existing edit session first.')
@@ -174,28 +252,39 @@ def start(paths, reason, initial=False):
     git('switch', '--detach', 'origin/main')
     git('lfs', 'pull')
     baseline = inventory()
-    if not baseline and not initial:
-        raise RuntimeError('No CAD files yet. Lead must import the initial Pack and Go first.')
+    existing = projects()
+    if project not in existing and not initial:
+        raise RuntimeError('Project not found. Refresh projects first.')
+    project_root(project)
+    owned_files = project_files(baseline, project)
+    if initial and owned_files:
+        raise RuntimeError('This project already contains files. Start a normal edit instead.')
+    if not owned_files and not initial:
+        raise RuntimeError('No CAD files yet. Import the initial Pack and Go first.')
     requested = sorted(set(paths))
     for p in requested:
-        safe_path(p)
-        if p not in baseline:
+        require_project_path(p, project)
+        if p not in owned_files:
             raise RuntimeError('Select an existing file: ' + p)
     if not requested and not initial:
         raise RuntimeError('Select at least one component.')
     # Every parent assembly can require a save after a component change.
-    allowed = sorted(set(requested) | {p for p in baseline if Path(p).suffix.lower() == '.sldasm'})
+    allowed = sorted(set(requested) | {p for p in owned_files if Path(p).suffix.lower() == '.sldasm'})
     identifier = uuid.uuid4().hex
     s = dict(id=identifier, base=git('rev-parse', 'HEAD'), branch='cad/edit-' + identifier[:12],
-             reason=reason, allowed=allowed, baseline=baseline, locks=[], phase='editing')
+             project=project, reason=reason, allowed=allowed, baseline=baseline, locks=[], phase='editing')
     try:
-        # The global lock is acquired FIRST. Concurrent full assembly edits are serialized.
-        for p in [LOCK] + [p for p in allowed if Path(p).suffix.lower() in NATIVE]:
+        # Each project serializes its own complete assembly edits.
+        for p in [project_lock(project)] + [p for p in allowed if Path(p).suffix.lower() in NATIVE]:
             lock = lock_result(git('lfs', 'lock', '--json', p))
             s['locks'].append({'path': p, 'id': str(lock['id'])})
             save(s)  # Keep recovery information even if a later command fails.
         git('switch', '-c', s['branch'])
-        (ROOT / LOCK).write_text(identifier + '\n', encoding='utf-8')
+        marker = ROOT / project_lock(project)
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        if marker.exists():
+            marker.chmod(marker.stat().st_mode | stat.S_IWUSR)
+        marker.write_text(identifier + '\n', encoding='utf-8')
         for p in allowed:
             fp = ROOT / p
             fp.chmod(fp.stat().st_mode | stat.S_IWUSR)
@@ -219,14 +308,12 @@ def check_locks(s):
         raise RuntimeError('A required lock was lost. Contact the lead before submitting.')
 
 
-def allow(paths):
+def allow(paths, metadata=False):
     s = session()
     if s['phase'] != 'editing':
         raise RuntimeError('This session is already submitted; finish it first.')
     for p in paths:
-        safe_path(p)
-        if p == LOCK:
-            raise RuntimeError('The session lock is managed automatically.')
+        require_project_path(p, s.get('project', LEGACY), metadata=metadata)
         if p not in s['allowed']:
             if p in s['baseline'] and Path(p).suffix.lower() in NATIVE:
                 lock = lock_result(git('lfs', 'lock', '--json', p))
@@ -239,6 +326,40 @@ def allow(paths):
     print('Edit scope updated.')
 
 
+def project_specs(project):
+    return [project_root(project)] + ([':(exclude)cad/projects'] if project == LEGACY else [])
+
+
+def validate_staged(base):
+    run('python' if os.name != 'nt' else 'py', *(['-3'] if os.name == 'nt' else []),
+        str(ROOT / 'tools/validate.py'), '--base', base, '--staged')
+
+
+def sync_review_base(s, target):
+    # Use ordinary merge commits so already published edit branches never need force pushes.
+    # Journal first; retrying Submit completes an interrupted merge/manifest update.
+    if s['phase'] != 'syncing':
+        s['resume_phase'] = s['phase']
+        s['pending_base'] = target
+        s['phase'] = 'syncing'
+        save(s)
+    if (ROOT / git('rev-parse', '--git-path', 'MERGE_HEAD')).exists():
+        raise RuntimeError('A merge is unfinished. Keep your work and ask the lead to resolve it before retrying Submit.')
+    git('merge', '--no-edit', target)
+    path = ROOT / 'changes' / (s['id'] + '.json')
+    manifest = json.loads(path.read_text(encoding='utf-8'))
+    manifest['base'] = target
+    path.write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
+    git('add', '--', path.relative_to(ROOT).as_posix())
+    validate_staged(target)
+    if git('diff', '--cached', '--name-only', 'HEAD'):
+        git('commit', '-m', 'CAD: refresh review base for ' + s.get('project', LEGACY))
+    s['base'] = target
+    s['phase'] = s.pop('resume_phase')
+    s.pop('pending_base')
+    save(s)
+
+
 def submit():
     s = session()
     if s['phase'] in ('cleanup', 'canceling'):
@@ -246,9 +367,14 @@ def submit():
     if git('branch', '--show-current') != s['branch']:
         raise RuntimeError('Return to your edit branch before submitting.')
     check_locks(s)
+    if s['phase'] == 'syncing':
+        sync_review_base(s, s['pending_base'])
     git('fetch', 'origin', 'main')
-    if git('rev-parse', 'origin/main') != s['base']:
-        raise RuntimeError('main advanced since checkout. Keep your files and ask the lead to reconcile the snapshot.')
+    target = git('rev-parse', 'origin/main')
+    project = s.get('project', LEGACY)
+    if target != s['base'] and git('diff', '--name-only', s['base'], target, '--', *project_specs(project)):
+        raise RuntimeError('This project changed on main. If your PR was merged, click Finish after merge / closure. '
+                           'Otherwise keep your files and ask the lead to reconcile this project.')
     if s['phase'] == 'editing':
         changes = diff(s['baseline'], inventory())
         unexpected = sorted(set(changes) - set(s['allowed']))
@@ -259,18 +385,20 @@ def submit():
         for p in changes:
             safe_path(p)
         manifest = {k: s[k] for k in ('id', 'base', 'reason', 'allowed')}
+        manifest['project'] = project
         manifest['changes'] = changes
         path = 'changes/' + s['id'] + '.json'
         (ROOT / 'changes').mkdir(exist_ok=True)
         (ROOT / path).write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
-        git('add', '--', 'cad', path)
+        git('add', '--', path, *project_specs(project))
         # Run the same validator used by CI before making a commit.
-        run('python' if os.name != 'nt' else 'py', *( ['-3'] if os.name == 'nt' else []),
-            str(ROOT / 'tools/validate.py'), '--base', s['base'], '--staged')
+        validate_staged(s['base'])
         git('commit', '-m', 'CAD: ' + s['reason'].replace('\n', ' ')[:160])
         s['phase'] = 'committed'
         save(s)
     ensure_clean()
+    if target != s['base']:
+        sync_review_base(s, target)
     git('push', '-u', 'origin', s['branch'])
     if s.get('pr'):
         print(s['pr'])
@@ -279,7 +407,7 @@ def submit():
     if existing:
         s['pr'] = existing[0]['url']
     else:
-        body = ('Purpose: ' + s['reason'] + '\n\nBase snapshot: `' + s['base'] + '`\n\n'
+        body = ('Project: `' + project + '`\n\nPurpose: ' + s['reason'] + '\n\nBase snapshot: `' + s['base'] + '`\n\n'
                 'Change manifest: `changes/' + s['id'] + '.json`\n\n'
                 'Lead: review the full SOLIDWORKS assembly, references, mates, interference, '
                 'mass, and target configuration before merging.\n\n'
@@ -310,7 +438,9 @@ def release_locks(s):
 
 def finish():
     s = session()
-    if s['phase'] == 'canceling':
+    if s['phase'] in ('canceling', 'syncing'):
+        if s['phase'] == 'syncing':
+            raise RuntimeError('Review base update is in progress. Retry Submit or Cancel edit.')
         raise RuntimeError('Cancellation is in progress. Retry Cancel edit.')
     if s['phase'] in ('submitted', 'committed'):
         prs = json.loads(run('gh', 'pr', 'list', '--head', s['branch'], '--state', 'all', '--json', 'state,url'))
@@ -342,9 +472,9 @@ def cancel():
                                       'head': git('rev-parse', 'HEAD'),
                                       'recovery': s['recovery']}, indent=2), encoding='utf-8')
     # Preserve actual CAD bytes before stashing anything (including untracked work).
-    if inventory():
+    if inventory(project=s.get('project', LEGACY)):
         archive = folder / ('cancel-' + s['id'] + '-' + uuid.uuid4().hex[:8] + '.zip')
-        export_zip(archive, editable=True)
+        export_zip(archive, editable=True, project=s.get('project', LEGACY))
         record({'zip': str(archive)})
     if git('status', '--porcelain'):
         git('stash', 'push', '--include-untracked', '-m', 'TVR canceled edit ' + s['id'])
@@ -370,9 +500,9 @@ def cancel():
     return message
 
 
-def export_zip(destination, root=None, editable=False):
+def export_zip(destination, root=None, editable=False, project=None):
     root = ROOT if root is None else root
-    files = inventory(root)
+    files = inventory(root, project=project)
     if not files:
         raise RuntimeError('This snapshot contains no CAD files.')
     for p in files:
@@ -390,7 +520,7 @@ def export_zip(destination, root=None, editable=False):
     print('Exported: ' + str(destination))
 
 
-def export_ref(ref, destination):
+def export_ref(ref, destination, project=None):
     git('fetch', 'origin', '--tags')
     sha = git('rev-parse', '--verify', ref + '^{commit}')
     with tempfile.TemporaryDirectory() as tmp:
@@ -398,7 +528,7 @@ def export_ref(ref, destination):
         git('worktree', 'add', '--detach', str(work), sha)
         try:
             git('lfs', 'pull', cwd=work)
-            export_zip(destination, work)
+            export_zip(destination, work, project=project)
         finally:
             git('worktree', 'remove', '--force', str(work))
 
@@ -414,6 +544,7 @@ def import_zip(source):
             if info.is_dir():
                 continue
             p = safe_path(info.filename)
+            require_project_path(str(p), s.get('project', LEGACY), metadata=True)
             normalized = str(p)
             if normalized != info.filename or normalized.lower() in names:
                 raise RuntimeError('Duplicate or non-canonical ZIP path: ' + info.filename)
@@ -427,14 +558,18 @@ def import_zip(source):
         if not names:
             raise RuntimeError('Empty ZIP.')
         staged = inventory(Path(tmp))
-        changes = diff(s['baseline'], staged)
+        meta = project_root(s.get('project', LEGACY)) + '/' + PROJECT_META
+        current = inventory(project=s.get('project', LEGACY))
+        if meta in current and staged.get(meta) != current[meta]:
+            raise RuntimeError('Keep the project details unchanged in the returned ZIP.')
+        changes = diff(project_files(s['baseline'], s.get('project', LEGACY)), staged)
         unexpected = sorted(set(changes) - set(s['allowed']))
         if unexpected:
             raise RuntimeError('ZIP changes outside the selected scope:\n' + '\n'.join(unexpected))
         # Keep a complete pre-import copy; never overwrite the only copy of member work.
         backup = ROOT / 'exports' / ('before-import-' + uuid.uuid4().hex[:12] + '.zip')
         backup.parent.mkdir(exist_ok=True)
-        export_zip(backup, editable=True)
+        export_zip(backup, editable=True, project=s.get('project', LEGACY))
         for p, change in changes.items():
             target = ROOT / p
             if target.exists():
@@ -447,9 +582,14 @@ def import_zip(source):
     print('Imported. Rebuild the complete assembly before Submit.')
 
 
-def seed(source):
-    if inventory():
-        raise RuntimeError('Initial import is only available for an empty vault.')
+def seed(source, project=LEGACY, name=None):
+    project_root(project)
+    if state_file().exists():
+        raise RuntimeError('Finish or cancel your current edit before importing a project.')
+    if inventory(project=project):
+        raise RuntimeError('Initial import is only available for an empty project.')
+    if project != LEGACY and (not isinstance(name, str) or not name.strip() or len(name.strip()) > 100):
+        raise RuntimeError('Enter a project name (maximum 100 characters).')
     source = Path(source).resolve()
     if source == ROOT or ROOT in source.parents or source in ROOT.parents:
         raise RuntimeError('Choose a separate Pack and Go folder, outside this repository.')
@@ -458,50 +598,85 @@ def seed(source):
         if p.is_symlink():
             raise RuntimeError('Pack and Go folder contains a symlink.')
         if p.is_file():
-            name = 'cad/' + p.relative_to(source).as_posix()
-            safe_path(name)
-            candidates[name] = p
+            if p.name.startswith('~$') or p.suffix.lower() in {'.sldbak', '.tmp', '.swp'}:
+                continue
+            dest = project_root(project) + '/' + p.relative_to(source).as_posix()
+            require_project_path(dest, project)
+            if dest.casefold() in {key.casefold() for key in candidates}:
+                raise RuntimeError('Pack and Go contains duplicate Windows filenames: ' + dest)
+            candidates[dest] = p
     if not any(Path(p).suffix.lower() == '.sldasm' for p in candidates):
         raise RuntimeError('Choose a complete Pack and Go folder containing an assembly.')
-    start([], 'Import initial TVR assembly', initial=True)
+    start([], 'Import initial assembly: ' + (name.strip() if name else 'TVR Rocket'), initial=True, project=project)
+    if project != LEGACY:
+        meta = project_root(project) + '/' + PROJECT_META
+        allow([meta], metadata=True)
+        (ROOT / meta).write_text(json.dumps({'schema': 1, 'id': project, 'name': name.strip()}, indent=2) + '\n', encoding='utf-8')
     allow(list(candidates))
     for name, src in candidates.items():
         target = ROOT / name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(src, target)
-    print('Initial assembly imported. Open it from cad/, rebuild, and Submit for review.')
+    message = ('Initial assembly imported into ' + str(ROOT / project_root(project)) +
+               '.\nOpen the top-level assembly from this folder, rebuild, and click Submit for review. '
+               'The project becomes available to everyone after the lead merges its PR.')
+    print(message)
+    return message
 
 
 def gui():
     import tkinter as tk
-    from tkinter import filedialog, messagebox, simpledialog
+    from tkinter import filedialog, messagebox, simpledialog, ttk
     app = tk.Tk()
     app.title('TVR CAD Vault')
-    app.geometry('820x780')
+    app.geometry('900x820')
+    controls = tk.Frame(app)
+    controls.pack(fill=tk.X, padx=12, pady=10)
+    tk.Label(controls, text='Project:').pack(side=tk.LEFT)
+    choice = ttk.Combobox(controls, state='readonly', width=48)
+    choice.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=8)
+    catalog = {}
+    selected_project = [LEGACY]
+    folder_text = tk.StringVar()
+    tk.Label(app, textvariable=folder_text, wraplength=870, justify=tk.LEFT).pack(fill=tk.X, padx=12)
     banner = tk.StringVar(value='Checking shared edit status...')
     tk.Label(app, textvariable=banner, wraplength=780, justify=tk.LEFT).pack(fill=tk.X, padx=12, pady=8)
-    tk.Label(app, text='Select the components you intend to edit. Parent assemblies are included.',
+    tk.Label(app, text='Select the components you intend to edit. Parent assemblies in this project are included.',
              wraplength=720).pack(pady=12)
     listing = tk.Listbox(app, selectmode=tk.EXTENDED, width=105, height=16)
     listing.pack(fill=tk.BOTH, expand=True, padx=12)
     def refresh():
+        catalog.clear()
+        catalog.update(projects())
+        locked = state_file().exists()
+        if locked:
+            selected_project[0] = session().get('project', LEGACY)
+        if selected_project[0] not in catalog:
+            selected_project[0] = LEGACY
+        choice['values'] = [name + ' [' + identifier + ']' for identifier, name in catalog.items()]
+        choice.current(list(catalog).index(selected_project[0]))
+        choice['state'] = 'disabled' if locked else 'readonly'
+        folder_text.set('Assembly folder: ' + str(ROOT / project_root(selected_project[0])) +
+                        ('\nFinish or cancel this session before switching projects.' if locked else ''))
         listing.delete(0, tk.END)
-        for p in inventory():
-            listing.insert(tk.END, p)
+        for p in inventory(project=selected_project[0]):
+            if Path(p).name != PROJECT_META:
+                listing.insert(tk.END, p)
         refresh_status()
     def refresh_status():
         try:
-            banner.set(status_text(active_edit_status()))
+            banner.set(status_text(active_edit_status(project=selected_project[0])))
         except (RuntimeError, ValueError, OSError) as e:
             banner.set('Edit status unavailable: ' + str(e) + '. You can still download a snapshot.')
     def poll_status():
         refresh_status()
         app.after(60000, poll_status)
-    def action(fn):
+    def action(fn, announce=True):
         try:
             result = fn()
             refresh()
-            messagebox.showinfo('TVR CAD', result if isinstance(result, str) else 'Done. See the terminal for details.')
+            if announce:
+                messagebox.showinfo('TVR CAD', result if isinstance(result, str) else 'Done. See the terminal for details.')
         except Exception as e:
             messagebox.showerror('TVR CAD', str(e))
     def selected():
@@ -509,11 +684,14 @@ def gui():
     def begin():
         reason = simpledialog.askstring('Purpose', 'What will change? Include the target motor/configuration.')
         if reason:
-            start(selected(), reason)
+            start(selected(), reason, project=selected_project[0])
     def download():
+        s = session()
+        if s['phase'] != 'editing':
+            raise RuntimeError('Start a fresh edit before exporting an editable ZIP. Viewing downloads remain available.')
         path = filedialog.asksaveasfilename(defaultextension='.zip')
         if path:
-            export_zip(path, editable=True)
+            export_zip(path, editable=True, project=s.get('project', LEGACY))
     def upload():
         path = filedialog.askopenfilename(filetypes=[('CAD workspace', '*.zip')])
         if path:
@@ -523,24 +701,51 @@ def gui():
         if ref:
             path = filedialog.asksaveasfilename(defaultextension='.zip')
             if path:
-                export_ref(ref, path)
+                export_ref(ref, path, project=selected_project[0])
     def initial():
         path = filedialog.askdirectory(title='Choose initial Pack and Go folder')
         if path:
-            seed(path)
+            seed(path, project=selected_project[0], name=catalog[selected_project[0]])
+    def add_project():
+        if state_file().exists():
+            raise RuntimeError('Finish or cancel your current session before adding another project.')
+        name = simpledialog.askstring('Add project', 'Project name, for example V2 or Cage testing frames:')
+        if not name or not name.strip():
+            return
+        suggested = re.sub(r'[^a-z0-9]+', '-', name.lower()).strip('-')[:48].rstrip('-')
+        identifier = simpledialog.askstring('Project folder',
+            'Unique folder ID (lowercase letters, numbers and hyphens):', initialvalue=suggested)
+        if identifier is None:
+            return
+        project_root(identifier)
+        if identifier == LEGACY or identifier in catalog:
+            raise RuntimeError('That project ID already exists. Choose a new ID.')
+        path = filedialog.askdirectory(title='Choose the unzipped Pack and Go folder for ' + name)
+        if path:
+            return seed(path, project=identifier, name=name)
+    def change_project(event=None):
+        selected_project[0] = list(catalog)[choice.current()]
+        refresh()
+    choice.bind('<<ComboboxSelected>>', lambda event: action(lambda: change_project(event), announce=False))
+    tk.Button(controls, text='Refresh projects', command=lambda: action(refresh_projects)).pack(side=tk.LEFT)
+    tk.Button(controls, text='Add project + import assembly', command=lambda: action(add_project)).pack(side=tk.LEFT, padx=6)
     def abandon():
         if messagebox.askyesno('Cancel edit', 'Close SOLIDWORKS first. Cancel your current edit?\n\n'
                                'The helper saves a CAD ZIP and stashes uncommitted work, closes your edit PR, '
                                'and releases your locks. Your branch and backups remain available.'):
             return cancel()
-    for label, fn in [('One-time setup', setup), ('Import initial assembly (lead)', initial),
+    buttons = tk.Frame(app)
+    buttons.pack(fill=tk.X, padx=12, pady=10)
+    buttons.columnconfigure(0, weight=1)
+    buttons.columnconfigure(1, weight=1)
+    for index, (label, fn) in enumerate([('One-time setup', setup), ('Import initial assembly', initial),
                       ('Refresh file list', refresh), ('Start edit', begin),
                       ('Add selected files to scope', lambda: allow(selected())),
                       ('Export editable ZIP', download), ('Import returned ZIP', upload),
                       ('Submit for review', submit), ('Finish after merge / closure', finish),
                       ('Cancel edit (keep backup)', abandon),
-                      ('Download current / historic snapshot', history)]:
-        tk.Button(app, text=label, command=lambda f=fn: action(f)).pack(side=tk.TOP, fill=tk.X, padx=12)
+                      ('Download current / historic snapshot', history)]):
+        tk.Button(buttons, text=label, command=lambda f=fn: action(f)).grid(row=index // 2, column=index % 2, sticky='ew', padx=3, pady=3)
     refresh()
     app.after(60000, poll_status)
     app.mainloop()
@@ -553,27 +758,31 @@ def main():
         sub.add_parser(name)
     p = sub.add_parser('start')
     p.add_argument('--reason', required=True)
+    p.add_argument('--project', default=LEGACY)
     p.add_argument('paths', nargs='+')
     p = sub.add_parser('allow')
     p.add_argument('paths', nargs='+')
     p = sub.add_parser('export')
     p.add_argument('destination')
     p.add_argument('--ref')
+    p.add_argument('--project', default=LEGACY)
     p = sub.add_parser('import')
     p.add_argument('source')
     p = sub.add_parser('seed')
     p.add_argument('source')
+    p.add_argument('--project', default=LEGACY)
+    p.add_argument('--name')
     a = parser.parse_args()
     if a.command == 'start':
-        start(a.paths, a.reason)
+        start(a.paths, a.reason, project=a.project)
     elif a.command == 'allow':
         allow(a.paths)
     elif a.command == 'export':
-        export_ref(a.ref, a.destination) if a.ref else export_zip(a.destination, editable=True)
+        export_ref(a.ref, a.destination, project=a.project) if a.ref else export_zip(a.destination, project=a.project)
     elif a.command == 'import':
         import_zip(a.source)
     elif a.command == 'seed':
-        seed(a.source)
+        seed(a.source, project=a.project, name=a.name)
     elif a.command == 'status':
         show_status()
     else:

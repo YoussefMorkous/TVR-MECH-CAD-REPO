@@ -85,6 +85,23 @@ class ReminderTests(unittest.TestCase):
             self.execute()
         self.assertFalse(any('--method' in call for call in self.calls))
 
+    def test_two_projects_get_separate_reminders_and_active_issue_stays_open(self):
+        second = dict(self.lock, id='v2-lock', path='cad/projects/v2/.edit-lock')
+        self.issues = [self.bot_issue('123')]
+        result = self.execute([self.lock, second])
+        self.assertIn('created', result)
+        posts = [call for call in self.calls if '--method' in call]
+        self.assertEqual(len(posts), 1)
+        self.assertTrue(any('Project: `v2`' in arg for arg in posts[0]))
+        self.assertFalse(any(call[:3] == ('gh', 'issue', 'close') for call in self.calls))
+
+    def test_finishing_one_project_only_closes_that_projects_reminder(self):
+        second = dict(self.lock, id='v2-lock', path='cad/projects/v2/.edit-lock')
+        self.issues = [self.bot_issue('123'), dict(self.bot_issue('v2-lock'), number=9)]
+        self.execute([second])
+        closes = [call for call in self.calls if call[:3] == ('gh', 'issue', 'close')]
+        self.assertEqual([call[3] for call in closes], ['8'])
+
 
 if __name__ == '__main__':
     unittest.main()
