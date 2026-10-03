@@ -202,18 +202,12 @@ def start(paths, reason, initial=False):
         save(s)
     except Exception:
         # Do not lose lock IDs when cleanup cannot reach the server.
-        failed = []
-        for lock in reversed(s['locks']):
-            try:
-                git('lfs', 'unlock', '--id', lock['id'])
-            except RuntimeError:
-                failed.append(lock)
-        if failed:
-            s['locks'] = list(reversed(failed))
-            s['phase'] = 'cleanup'
-            save(s)
-        else:
-            state_file().unlink(missing_ok=True)
+        s['phase'] = 'cleanup'
+        save(s)
+        try:
+            release_locks(s)
+        except RuntimeError:
+            pass  # Preserve the original failure; Finish can retry remaining IDs.
         raise
     print('Edit session started: ' + s['branch'])
 
@@ -483,7 +477,7 @@ def gui():
     from tkinter import filedialog, messagebox, simpledialog
     app = tk.Tk()
     app.title('TVR CAD Vault')
-    app.geometry('820x900')
+    app.geometry('820x780')
     banner = tk.StringVar(value='Checking shared edit status...')
     tk.Label(app, textvariable=banner, wraplength=780, justify=tk.LEFT).pack(fill=tk.X, padx=12, pady=8)
     tk.Label(app, text='Select the components you intend to edit. Parent assemblies are included.',
