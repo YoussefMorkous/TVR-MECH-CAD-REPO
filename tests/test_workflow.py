@@ -199,6 +199,28 @@ class WorkflowTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'lock was lost'):
                 cad.check_locks({'locks': [{'id': '1', 'path': 'cad/.edit-lock'}]})
 
+    def test_failed_checkout_keeps_assembly_lock_when_component_cleanup_fails(self):
+        actual = cad.git
+        acquired, attempted = [], []
+        def server(*args, **kwargs):
+            if args[:2] == ('lfs', 'pull'):
+                return ''
+            if args[:2] == ('lfs', 'lock'):
+                if len(acquired) == 2:
+                    raise RuntimeError('Mount already locked')
+                acquired.append(args[-1])
+                return json.dumps({'id': str(len(acquired)), 'path': args[-1]})
+            if args[:2] == ('lfs', 'unlock'):
+                attempted.append(args[-1])
+                raise RuntimeError('Cannot contact lock server')
+            return actual(*args, **kwargs)
+        with patch.object(cad, 'git', server):
+            with self.assertRaisesRegex(RuntimeError, 'Mount already locked'):
+                cad.start(['cad/Mount.SLDPRT'], 'Fit motor')
+        self.assertEqual(attempted, ['2'])
+        self.assertEqual(cad.session()['phase'], 'cleanup')
+        self.assertEqual([lock['id'] for lock in cad.session()['locks']], ['1', '2'])
+
     def test_separate_tooling_pr_is_allowed(self):
         (self.root / 'tools/new.py').write_text('print("updated helper")')
         self.g('add', 'tools/new.py')
