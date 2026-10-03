@@ -1,0 +1,19 @@
+{
+  "id": "036c1d84e4874a5d87c91d148cea9a73",
+  "base": "ad2e3d3f8d7d7fae074108c528a3e14d93749003",
+  "reason": "change length to 400mm",
+  "allowed": [
+    "cad/FULL_V1.85_ASSEMBLY.SLDASM",
+    "cad/Frame_and_Legs.SLDASM",
+    "cad/Lower_Servo_Assembly.SLDASM",
+    "cad/Main_CF_Rod.SLDPRT",
+    "cad/Propulssion_Cage_Assembly.SLDASM",
+    "cad/Propulssion_Holder_Assembly.SLDASM",
+    "cad/XMH-430_SERVO1.SLDASM",
+    "cad/XMH-430_SERVO2.SLDASM",
+    "cad/avionics bay assembly.SLDASM"
+  ],
+  "changes": {
+    "cad/Main_CF_Rod.SLDPRT": "modified"
+  }
+}
