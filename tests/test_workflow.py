@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -122,6 +123,15 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(cad.diff(self.before, cad.inventory()), {'cad/Mount.SLDPRT': 'modified'})
         self.assertEqual(self.g('show', ':cad/Ring.sldprt'), self.g('show', self.base + ':cad/Ring.sldprt'))
         self.validate()
+
+    def test_validation_uses_active_interpreter_with_spaces_in_path(self):
+        self.stage_change()
+        interpreter = Path(self.tmp.name) / 'Python install' / 'python3'
+        interpreter.parent.mkdir()
+        interpreter.symlink_to(sys.executable)
+        # A macOS/venv interpreter need not have a `python` or `py` alias.
+        with patch.object(cad.sys, 'executable', str(interpreter)):
+            cad.validate_staged(self.base)
 
     def test_unexpected_change_rejected(self):
         self.stage_change(allowed=['cad/Ring.sldprt'])

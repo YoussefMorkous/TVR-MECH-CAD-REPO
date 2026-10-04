@@ -3,6 +3,7 @@
 *.yml text eol=lf
 *.md text eol=lf
 *.bat text eol=crlf
+*.command text eol=lf
 *.[sS][lL][dD][pP][rR][tT] filter=lfs diff=lfs merge=lfs -text lockable
 *.[sS][lL][dD][aA][sS][mM] filter=lfs diff=lfs merge=lfs -text lockable
 *.[sS][lL][dD][dD][rR][wW] filter=lfs diff=lfs merge=lfs -text lockable

@@ -9,6 +9,7 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import uuid
 import zipfile
@@ -331,8 +332,9 @@ def project_specs(project):
 
 
 def validate_staged(base):
-    run('python' if os.name != 'nt' else 'py', *(['-3'] if os.name == 'nt' else []),
-        str(ROOT / 'tools/validate.py'), '--base', base, '--staged')
+    # Reuse this interpreter on every platform, including Python.org installs
+    # and virtual environments where a separate `python`/`py` is unavailable.
+    run(sys.executable, str(ROOT / 'tools/validate.py'), '--base', base, '--staged')
 
 
 def sync_review_base(s, target):

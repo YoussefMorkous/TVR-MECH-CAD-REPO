@@ -76,6 +76,45 @@ class ProjectTests(unittest.TestCase):
         finally:
             self.g('worktree', 'remove', str(work))
 
+    def test_step_only_contribution_submits_and_downloads_without_native_changes(self):
+        self.add_projects()
+        native_before = {p: value for p, value in cad.inventory().items()
+                         if Path(p).suffix.lower() in cad.NATIVE}
+        added = {'cad/projects/v2/Bracket_CAGE.step': b'ISO-10303-21;\nSTEP geometry\n',
+                 'cad/projects/v2/Spacer_CAGE.stp': b'ISO-10303-21;\nSpacer geometry\n'}
+        actual_run = cad.run
+        def without_python_alias(*args, **kwargs):
+            if args[0] in ('python', 'py'):
+                raise FileNotFoundError('No legacy Python launcher installed')
+            return actual_run(*args, **kwargs)
+        with patch.object(cad, 'run', without_python_alias), self.server() as locks:
+            # Existing reference component stays unchanged; only STEP files are added.
+            cad.start(['cad/projects/v2/Part.SLDPRT'], 'Add STEP components', project='v2')
+            for path, data in added.items():
+                (self.root / path).write_bytes(data)
+            cad.allow(list(added))
+            cad.submit()
+            self.assertEqual(cad.session()['phase'], 'submitted')
+            self.assertTrue(locks)
+            self.validate(staged=False)
+            for path in added:
+                self.assertTrue(self.g('show', 'HEAD:' + path).startswith(
+                    'version https://git-lfs.github.com/spec/v1'))
+            native_after = {p: value for p, value in cad.inventory().items()
+                            if Path(p).suffix.lower() in cad.NATIVE}
+            self.assertEqual(native_before, native_after)
+            before_session = cad.state_file().read_bytes()
+            before_locks = [dict(lock) for lock in locks]
+            download = Path(self.tmp.name) / 'STEP contribution.zip'
+            cad.export_ref(self.g('rev-parse', 'HEAD'), download, project='v2')
+            with zipfile.ZipFile(download) as archive:
+                for path, data in added.items():
+                    self.assertEqual(archive.read(path), data)
+                self.assertTrue(all(name.startswith('cad/projects/v2/')
+                                    for name in archive.namelist()))
+            self.assertEqual(cad.state_file().read_bytes(), before_session)
+            self.assertEqual(locks, before_locks)
+
     def test_catalog_and_downloads_keep_legacy_separate(self):
         self.add_projects()
         self.assertEqual(cad.projects()['cage-testing'], 'Cage testing frames')
