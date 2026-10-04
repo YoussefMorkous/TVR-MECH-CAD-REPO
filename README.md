@@ -1,11 +1,11 @@
 # TVR CAD Vault
 
-Select a project in the Windows helper, work on its complete assembly, and submit changes for lead review.
+Select a project in the Windows or macOS helper and submit changes for lead review. macOS members can download snapshots and add STEP files without SOLIDWORKS; native SOLIDWORKS editing requires a compatible Windows environment.
 The existing rocket stays in `cad/`; new projects have separate folders under `cad/projects/<project-id>/`. Projects share `main` and Git history; they are not separate Git branches.
 
 ## Member workflow
 
-1. Open `Start_CAD.bat`. Choose a **Project** at the top. Click **Refresh projects** to fetch newly approved projects before starting an edit. Select the parts you intend to edit and click **Start edit**.
+1. Open `Start_CAD.bat` on Windows or run `bash Start_CAD.command` from the repository folder in macOS Terminal. Choose a **Project** at the top. Click **Refresh projects** to fetch newly approved projects before starting an edit. Select the parts you intend to edit and click **Start edit**.
 2. Open the assembly from the **Assembly folder** shown in the helper, in SOLIDWORKS 2026. Edit, rebuild, and save parts and parent assemblies.
 3. Click **Submit for review**. The helper detects changed bytes, checks the selected scope, and opens a GitHub pull request.
 4. Youssef reviews the complete assembly and merges the pull request.
@@ -32,6 +32,10 @@ Start_CAD.bat
 ```
 
 Click **One-time setup**. Every editor needs repository write access and their own GitHub account. Give Git a name and email if it asks at the first commit. Keep the clone outside OneDrive or similar synced folders. Close SOLIDWORKS before switching snapshots or starting another session. Never open a historic snapshot and the current assembly with identical filenames in the same SOLIDWORKS session.
+
+## One-time member installation (macOS)
+
+Follow [Mac setup, downloads, and STEP uploads](docs/MAC_SETUP.md). It covers Apple Silicon and Intel Macs, the required downloads, account setup, launching the interface, adding files to an existing project, and common errors. SOLIDWORKS and GitHub Desktop are not required for this file contribution workflow.
 
 ## Add a project and import its initial assembly
 

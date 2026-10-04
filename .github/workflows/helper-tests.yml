@@ -8,12 +8,25 @@ permissions:
   contents: read
 jobs:
   tests:
-    runs-on: ubuntu-latest
+    name: Helper tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
         with:
           lfs: false
           persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Git LFS on macOS if needed
+        if: runner.os == 'macOS'
+        run: git lfs version || brew install git-lfs
+      - name: Check Mac launcher syntax
+        run: bash -n Start_CAD.command
       - run: python3 -m unittest discover -s tests -v
       - name: Verify access to shared edit status
         env:
