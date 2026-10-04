@@ -1,0 +1,21 @@
+{
+  "id": "2c16f04d32204b09b5e7e035d25c4491",
+  "base": "bdc825d1b0721a396b8f21cdd91ee1a68063f541",
+  "reason": "Add STEP for MAC Repo Test",
+  "allowed": [
+    "cad/45mm cylinder.step",
+    "cad/FULL_V1.85_ASSEMBLY.SLDASM",
+    "cad/Frame_and_Legs.SLDASM",
+    "cad/Lower_Servo_Assembly.SLDASM",
+    "cad/Propulssion_Cage_Assembly.SLDASM",
+    "cad/Propulssion_Holder_Assembly.SLDASM",
+    "cad/XMH-430_SERVO1.SLDASM",
+    "cad/XMH-430_SERVO2.SLDASM",
+    "cad/avionics bay assembly.SLDASM",
+    "cad/Repo_Test.step"
+  ],
+  "project": "legacy",
+  "changes": {
+    "cad/Repo_Test.step": "added"
+  }
+}
