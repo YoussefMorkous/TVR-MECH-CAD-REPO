@@ -1,0 +1,20 @@
+{
+  "id": "5ead34f8fc9f4df49c88aededcd0bf81",
+  "base": "5979ad26e0d5f56396b998dd3b6dfde87cdde428",
+  "reason": "Remove Repo CAD Test Part",
+  "allowed": [
+    "cad/FULL_V1.85_ASSEMBLY.SLDASM",
+    "cad/Frame_and_Legs.SLDASM",
+    "cad/Lower_Servo_Assembly.SLDASM",
+    "cad/Propulssion_Cage_Assembly.SLDASM",
+    "cad/Propulssion_Holder_Assembly.SLDASM",
+    "cad/Repo_Test.step",
+    "cad/XMH-430_SERVO1.SLDASM",
+    "cad/XMH-430_SERVO2.SLDASM",
+    "cad/avionics bay assembly.SLDASM"
+  ],
+  "project": "legacy",
+  "changes": {
+    "cad/Repo_Test.step": "deleted"
+  }
+}
