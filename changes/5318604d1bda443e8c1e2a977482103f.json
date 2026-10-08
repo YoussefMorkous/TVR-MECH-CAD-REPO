@@ -1,0 +1,24 @@
+{
+  "id": "5318604d1bda443e8c1e2a977482103f",
+  "base": "f5de33d04be3572cff29640b5a923ff52bb7f5fa",
+  "reason": "Adjust prop. holder tolerances",
+  "allowed": [
+    "cad/FULL_V1.85_ASSEMBLY.SLDASM",
+    "cad/Frame_and_Legs.SLDASM",
+    "cad/Lower_Servo_Assembly.SLDASM",
+    "cad/Propulssion_Cage_Assembly.SLDASM",
+    "cad/Propulssion_Holder_Assembly.SLDASM",
+    "cad/XMH-430_SERVO1.SLDASM",
+    "cad/XMH-430_SERVO2.SLDASM",
+    "cad/avionics bay assembly.SLDASM",
+    "cad/Servo_Prism.SLDPRT",
+    "cad/Servo_Shim.SLDPRT",
+    "cad/V1.85Motor Stand 1.75.SLDPRT"
+  ],
+  "project": "legacy",
+  "changes": {
+    "cad/Propulssion_Holder_Assembly.SLDASM": "modified",
+    "cad/Servo_Shim.SLDPRT": "modified",
+    "cad/V1.85Motor Stand 1.75.SLDPRT": "modified"
+  }
+}
